@@ -6,7 +6,9 @@
  *   👑 Assinantes    lista/da/estende/revoga VIP           (coleção  vip/{email})
  *   🎫 Reports       responde tickets do suporte           (coleção  tickets + respostas)
  *   🎬 Pedidos       marca pedidos como atendido/recusado  (coleção  pedidos)
- *   ⏱️ Testes grátis  vê quem já usou / libera de novo      (coleção  trial)
+ *   ⏱️ Testes grátis  vê quem já usou / libera de novo      (coleções trial, trial_devices, trial_fp)
+ *   🎁 Convites      confere convites e dá o bônus de VIP  (coleções convites, convites_privado, convites_donos)
+ *   📊 Resumo        gráfico de assinantes, conversão teste→pago, ranking de pedidos (stats_diario)
  *
  * SEGURANÇA: só o e-mail da lista ADMIN_EMAILS consegue usar o painel, e — mais importante —
  * as regras do Firestore (firestore.rules, "ehAdmin()") também só deixam esse e-mail
@@ -17,12 +19,17 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/fireba
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
   from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
 import {
-  getFirestore, collection, doc, getDocs, setDoc, updateDoc, deleteDoc, addDoc, query, orderBy, limit,
-  onSnapshot, serverTimestamp
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, addDoc, query, orderBy, limit,
+  onSnapshot, serverTimestamp, writeBatch
 } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
 const ADMIN_EMAILS = ['canalpedroid@gmail.com'];
 const TRIAL_MS = 3 * 60 * 60 * 1000;
+const DIA_MS = 86400000;
+const VITALICIO_MS = 4000000000000;           // vip_ate acima disso = vitalício
+// Bônus do convite (mantenha igual ao BONUS do site, em assets/js/convite.js)
+const BONUS_CONVIDANTE = 6;                   // dias pra quem convidou
+const BONUS_AMIGO = 10;                       // dias pro amigo (além do mês que ele pagou)
 
 const app = initializeApp({
   apiKey: "AIzaSyDQK5iw8v0eVf6auRiVkZzaRJn_I6znbeA",
@@ -92,9 +99,9 @@ onAuthStateChanged(auth, async (user) => {
 });
 
 /* ═══════════════════════ ABAS ═══════════════════════ */
-const ABAS = ['assinantes', 'reports', 'pedidos', 'testes'];
+const ABAS = ['resumo', 'assinantes', 'reports', 'pedidos', 'testes', 'convites'];
 function abrirAba(nome) {
-  if (!ABAS.includes(nome)) nome = 'assinantes';
+  if (!ABAS.includes(nome)) nome = 'resumo';
   document.querySelectorAll('.aba').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.aba === nome)));
   ABAS.forEach((a) => { $('painel-' + a).hidden = a !== nome; });
   try { history.replaceState(null, '', '#' + nome); } catch (e) {}
@@ -103,14 +110,24 @@ document.querySelectorAll('.aba').forEach((b) => b.addEventListener('click', () 
 
 function iniciarPainel() {
   abrirAba((location.hash || '').replace('#', ''));
-  carregarVip();
+  $('bonusTxt').textContent = '+' + BONUS_CONVIDANTE + ' dias pra quem convidou e +' + BONUS_AMIGO + ' dias pro amigo';
   ouvirReports();
   ouvirPedidos();
-  carregarTestes();
+  // Resumo e Convites cruzam assinantes × testes × convites, então esperam os dois carregarem
+  Promise.all([carregarVip(), carregarTestes()]).then(() => { carregarResumo(); carregarConvites(); });
 }
 
 /* ═══════════════════════ 👑 ASSINANTES ═══════════════════════ */
 let vipLista = [];
+let vipVisiveis = [];            // o que está na tela agora (usado pelo CSV)
+
+// Quando o VIP começou. O painel não sabe qual campo o seu webhook de pagamento grava,
+// então tenta vários nomes comuns; se nenhum existir, assume plano mensal (vence − 30 dias).
+function inicioDoVip(x, ate) {
+  const cands = [x.vip_inicio, x.inicio, x.criadoEm, x.criado_em, x.desde, x.pago_em, x.atualizadoEm];
+  for (const c of cands) { const t = ms(c); if (t) return t; }
+  return ate && ate < VITALICIO_MS ? ate - 30 * DIA_MS : 0;
+}
 
 async function carregarVip() {
   try {
@@ -118,7 +135,8 @@ async function carregarVip() {
     vipLista = [];
     snap.forEach((d) => {
       const x = d.data();
-      vipLista.push({ id: d.id, email: x.email || d.id, plano: x.plano || '—', ate: ms(x.vip_ate), origem: x.origem || '' });
+      const ate = ms(x.vip_ate);
+      vipLista.push({ id: d.id, email: x.email || d.id, plano: x.plano || '—', ate: ate, origem: x.origem || '', inicio: inicioDoVip(x, ate) });
     });
     vipLista.sort((a, b) => b.ate - a.ate);
     desenharVip();
@@ -142,12 +160,15 @@ function desenharVip() {
   $('ctAssinantes').textContent = vipLista.filter((v) => v.ate > agora).length + ' ativos / ' + vipLista.length;
   $('vazioVip').textContent = 'Nenhum assinante encontrado.';
   $('vazioVip').hidden = vis.length > 0;
+  vipVisiveis = vis;
+  $('csvVip').textContent = '⬇️ Exportar CSV (' + vis.length + ')';
+  $('csvVip').disabled = vis.length === 0;
   vis.forEach((v) => {
     const ativo = v.ate > agora;
     const tr = el('tr');
     tr.appendChild(el('td', 'email', v.email));
-    tr.appendChild(el('td', null, v.plano + (v.origem === 'admin' ? ' 🎁' : '')));
-    tr.appendChild(el('td', null, v.ate > 4000000000000 ? 'Vitalício' : fmtData(v.ate)));
+    tr.appendChild(el('td', null, v.plano + (v.origem === 'admin' || v.origem === 'convite' ? ' 🎁' : '')));
+    tr.appendChild(el('td', null, v.ate > VITALICIO_MS ? 'Vitalício' : fmtData(v.ate)));
     const st = el('td'); st.appendChild(ativo ? tag('Ativo', 'ok') : tag('Expirado', 'mut')); tr.appendChild(st);
     const ac = el('td'); const box = el('div', 'acoes');
     const mais = el('button', 'btn btn--sm', '+30 dias'); mais.type = 'button';
@@ -212,6 +233,30 @@ $('formVip').addEventListener('submit', async (ev) => {
 $('buscaVip').addEventListener('input', desenharVip);
 $('filtroVip').addEventListener('change', desenharVip);
 $('recVip').addEventListener('click', carregarVip);
+
+/* ───── ⬇️ Exportar e-mails em CSV ───── */
+// Cuidado com planilha: célula começando com = + - @ vira fórmula no Excel/Sheets → prefixa com '
+function csvCelula(v) {
+  let t = String(v == null ? '' : v);
+  if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+  return /[",\n\r;]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+}
+$('csvVip').addEventListener('click', () => {
+  if (!vipVisiveis.length) { toast('Nada pra exportar'); return; }
+  const agora = Date.now();
+  const linhas = [['email', 'plano', 'status', 'vence_em', 'origem']];
+  vipVisiveis.forEach((v) => {
+    linhas.push([v.email, v.plano === '—' ? '' : v.plano, v.ate > agora ? 'ativo' : 'expirado',
+      v.ate > VITALICIO_MS ? 'vitalicio' : (v.ate ? new Date(v.ate).toISOString().slice(0, 10) : ''), v.origem]);
+  });
+  // BOM no começo: sem ele o Excel estraga os acentos
+  const csv = '\ufeff' + linhas.map((l) => l.map(csvCelula).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = el('a'); a.href = url; a.download = 'pipocaflix-vip-' + chaveDia(agora) + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  toast('⬇️ ' + vipVisiveis.length + ' e-mails exportados');
+});
 
 /* ═══════════════════════ 🎫 REPORTS ═══════════════════════ */
 const cards = new Map();      // ticketId → { el, sig, status, unsubResp }
@@ -386,7 +431,10 @@ async function carregarTestes() {
   try {
     const snap = await getDocs(collection(db, 'trial'));
     testesLista = [];
-    snap.forEach((d) => { const x = d.data(); testesLista.push({ id: d.id, email: x.email || d.id, criado: ms(x.criadoEm) }); });
+    snap.forEach((d) => {
+      const x = d.data();
+      testesLista.push({ id: d.id, email: x.email || d.id, criado: ms(x.criadoEm), uid: x.uid || '', deviceId: x.deviceId || '', fp: x.fp || '' });
+    });
     testesLista.sort((a, b) => b.criado - a.criado);
     desenharTestes();
   } catch (e) {
@@ -397,7 +445,7 @@ async function carregarTestes() {
 function desenharTestes() {
   const busca = $('buscaTeste').value.trim().toLowerCase();
   const tb = $('tabTestes').querySelector('tbody'); tb.innerHTML = '';
-  const vis = testesLista.filter((t) => !busca || t.email.toLowerCase().includes(busca));
+  const vis = testesLista.filter((t) => !busca || t.email.toLowerCase().includes(busca) || t.deviceId.startsWith(busca));
   const agora = Date.now();
   $('ctTestes').textContent = testesLista.length;
   $('vazioTestes').textContent = 'Nenhum teste registrado.';
@@ -407,16 +455,346 @@ function desenharTestes() {
     const tr = el('tr');
     tr.appendChild(el('td', 'email', t.email));
     tr.appendChild(el('td', null, fmtData(t.criado, true)));
+    const ap = el('td', null, t.deviceId ? t.deviceId.slice(0, 8) : 'antigo (sem registro)');
+    if (t.deviceId) ap.title = 'deviceId ' + t.deviceId + '\nfp ' + t.fp;
+    tr.appendChild(ap);
     const st = el('td'); st.appendChild(ativo ? tag('Em andamento', 'ok') : tag('Já usou', 'mut')); tr.appendChild(st);
     const ac = el('td'); const b = el('button', 'btn btn--sm', 'Liberar de novo'); b.type = 'button';
     b.addEventListener('click', async () => {
-      if (!confirm('Apagar o registro de ' + t.email + '? Ele poderá fazer um novo teste de 3 horas.')) return;
+      if (!confirm('Apagar o registro de ' + t.email + ' e do aparelho dele? Ele (e esse aparelho) poderão fazer um novo teste de 3 horas.')) return;
       b.disabled = true;
-      try { await deleteDoc(doc(db, 'trial', t.id)); toast('Teste liberado de novo: ' + t.email); await carregarTestes(); }
-      catch (e) { toast('⚠️ Não deu pra apagar'); b.disabled = false; }
+      try {
+        // apaga o e-mail E o aparelho — se só apagasse o e-mail, o aparelho continuaria bloqueado
+        const lote = writeBatch(db);
+        lote.delete(doc(db, 'trial', t.id));
+        if (t.deviceId) lote.delete(doc(db, 'trial_devices', t.deviceId));
+        if (t.fp) lote.delete(doc(db, 'trial_fp', t.fp));
+        await lote.commit();
+        toast('Teste liberado de novo: ' + t.email); await carregarTestes();
+      } catch (e) { console.warn('[Admin] liberar teste:', e && e.code || e); toast('⚠️ Não deu pra apagar (' + (e && e.code || 'erro') + ')'); b.disabled = false; }
     });
     ac.appendChild(b); tr.appendChild(ac); tb.appendChild(tr);
   });
 }
 $('buscaTeste').addEventListener('input', desenharTestes);
 $('recTestes').addEventListener('click', carregarTestes);
+
+/* ═══════════════════════ 📊 RESUMO ═══════════════════════ */
+const chaveDia = (t) => { const d = new Date(t); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+const inicioDoDia = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const inicioDaSemana = (t) => { const d = new Date(inicioDoDia(t)); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); };   // segunda-feira
+const fmtDM = (t) => new Date(t).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+
+let snapshots = new Map();     // 'AAAA-MM-DD' → ativos (foto real gravada pelo painel)
+
+async function carregarResumo() {
+  try {
+    const s = await getDocs(query(collection(db, 'stats_diario'), limit(800)));
+    snapshots = new Map();
+    s.forEach((d) => { const x = d.data(); if (typeof x.ativos === 'number') snapshots.set(d.id, x.ativos); });
+  } catch (e) { console.warn('[Admin] stats_diario:', e && e.code || e); }
+
+  // Foto de hoje: a cada vez que você abre o painel, o número do dia fica guardado.
+  // É isso que, com o tempo, troca a estimativa por dado real no gráfico.
+  const agora = Date.now();
+  const ativos = vipLista.filter((v) => v.ate > agora).length;
+  snapshots.set(chaveDia(agora), ativos);
+  try {
+    await setDoc(doc(db, 'stats_diario', chaveDia(agora)), { dia: chaveDia(agora), ativos: ativos, total: vipLista.length, testes: testesLista.length, atualizadoEm: serverTimestamp() }, { merge: true });
+  } catch (e) { console.warn('[Admin] gravar foto do dia:', e && e.code || e); }
+
+  desenharKpis(); desenharGrafico(); desenharConversao(); carregarRanking();
+}
+$('recResumo').addEventListener('click', async () => { await Promise.all([carregarVip(), carregarTestes()]); carregarResumo(); });
+$('grPeriodo').addEventListener('change', desenharGrafico);
+
+/* ── cartões de números ── */
+function convertido(t) {
+  const v = vipLista.find((x) => x.id === t.id);
+  if (!v || v.origem === 'admin' || v.origem === 'convite') return null;   // presente/bônus não é venda
+  if (v.inicio && v.inicio < t.criado - DIA_MS) return null;                // já era assinante antes do teste
+  return v;
+}
+function desenharKpis() {
+  const agora = Date.now();
+  const ativos = vipLista.filter((v) => v.ate > agora);
+  const vencendo = ativos.filter((v) => v.ate < VITALICIO_MS && v.ate - agora < 7 * DIA_MS).length;
+  const t30 = testesLista.filter((t) => agora - t.criado < 30 * DIA_MS);
+  const conv30 = t30.filter(convertido).length;
+  const convTotal = testesLista.filter(convertido).length;
+  const k = (valor, rotulo, cls) => { const d = el('div', 'kpi' + (cls ? ' kpi--' + cls : '')); d.appendChild(el('b', null, valor)); d.appendChild(el('span', null, rotulo)); return d; };
+  const box = $('kpis'); box.innerHTML = '';
+  box.appendChild(k(String(ativos.length), 'assinantes ativos agora', 'ok'));
+  box.appendChild(k(String(vencendo), 'vencem nos próximos 7 dias', vencendo ? 'warn' : ''));
+  box.appendChild(k(String(t30.length), 'testes grátis nos últimos 30 dias'));
+  box.appendChild(k(t30.length ? Math.round(conv30 / t30.length * 100) + '%' : '—', 'dos testes de 30 dias já viraram assinatura (' + conv30 + ' de ' + t30.length + ')'));
+  box.appendChild(k(testesLista.length ? Math.round(convTotal / testesLista.length * 100) + '%' : '—', 'conversão de todos os testes já feitos (' + convTotal + ' de ' + testesLista.length + ')'));
+}
+
+/* ── gráfico: assinantes ativos por dia ── */
+function ativosEstimados(dia) {
+  const ini = inicioDoDia(dia), fim = ini + DIA_MS - 1;
+  return vipLista.filter((v) => v.inicio && v.inicio <= fim && v.ate >= ini).length;
+}
+function desenharGrafico() {
+  const dias = Number($('grPeriodo').value) || 90;
+  const hoje = inicioDoDia(Date.now());
+  const serie = [];
+  for (let i = dias - 1; i >= 0; i--) {
+    const t = hoje - i * DIA_MS, k = chaveDia(t);
+    const real = snapshots.has(k);
+    serie.push({ t: t, n: real ? snapshots.get(k) : ativosEstimados(t), real: real });
+  }
+  const box = $('grafico'); box.innerHTML = '';
+  const reais = serie.filter((p) => p.real).length;
+  $('grLegenda').textContent = reais >= serie.length
+    ? 'Todos os pontos são fotos diárias reais.'
+    : 'Linha vermelha contínua = número real guardado pelo painel (' + reais + ' ' + (reais === 1 ? 'dia' : 'dias') + ' até agora). Linha cinza tracejada = estimativa a partir das datas de início e vencimento de cada VIP — renovações antigas podem fazer o passado parecer menor do que foi. Cada vez que você abre o painel, o dia de hoje vira dado real.';
+  if (!vipLista.length) { box.appendChild(el('p', 'gr-vazio', 'Ainda não há assinantes cadastrados.')); return; }
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (tipo, attrs, txt) => { const e = document.createElementNS(NS, tipo); Object.keys(attrs || {}).forEach((a) => e.setAttribute(a, attrs[a])); if (txt != null) e.textContent = txt; return e; };
+  const W = 720, H = 240, pl = 34, pr = 10, pt = 12, pb = 26;
+  const maxN = Math.max(1, ...serie.map((p) => p.n));
+  const topo = maxN <= 5 ? 5 : Math.ceil(maxN / 5) * 5;
+  const X = (i) => pl + (W - pl - pr) * (serie.length === 1 ? 0 : i / (serie.length - 1));
+  const Y = (n) => pt + (H - pt - pb) * (1 - n / topo);
+  const svg = mk('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': 'Assinantes ativos por dia' });
+  for (let g = 0; g <= 4; g++) {
+    const v = Math.round(topo * g / 4), y = Y(v);
+    svg.appendChild(mk('line', { x1: pl, x2: W - pr, y1: y, y2: y, class: 'gr-grade' }));
+    svg.appendChild(mk('text', { x: pl - 6, y: y + 4, 'text-anchor': 'end', class: 'gr-eixo' }, String(v)));
+  }
+  [0, Math.floor((serie.length - 1) / 2), serie.length - 1].forEach((i, k) => {
+    svg.appendChild(mk('text', { x: X(i), y: H - 6, 'text-anchor': k === 0 ? 'start' : k === 2 ? 'end' : 'middle', class: 'gr-eixo' }, fmtDM(serie[i].t)));
+  });
+  svg.appendChild(mk('polyline', { points: serie.map((p, i) => X(i) + ',' + Y(p.n)).join(' '), class: 'gr-est' }));
+  // trechos reais, em contínuo por cima
+  let trecho = [];
+  const fechar = () => { if (trecho.length > 1) svg.appendChild(mk('polyline', { points: trecho.join(' '), class: 'gr-real' })); trecho = []; };
+  serie.forEach((p, i) => { if (p.real) trecho.push(X(i) + ',' + Y(p.n)); else fechar(); });
+  fechar();
+  serie.forEach((p, i) => {
+    if (p.real && (serie.length <= 40 || i === serie.length - 1)) svg.appendChild(mk('circle', { cx: X(i), cy: Y(p.n), r: 3.5, class: 'gr-pt' }));
+    const hit = mk('circle', { cx: X(i), cy: Y(p.n), r: Math.max(4, (W - pl - pr) / serie.length / 2), class: 'gr-hit' });
+    hit.appendChild(mk('title', {}, fmtData(p.t) + ' — ' + p.n + ' ativos' + (p.real ? '' : ' (estimado)')));
+    svg.appendChild(hit);
+  });
+  box.appendChild(svg);
+}
+
+/* ── conversão teste → assinante, por semana ── */
+function desenharConversao() {
+  const tb = $('tabConversao').querySelector('tbody'); tb.innerHTML = '';
+  $('vazioConversao').hidden = testesLista.length > 0;
+  const semanaAtual = inicioDaSemana(Date.now());
+  for (let i = 0; i < 8; i++) {
+    const ini = semanaAtual - i * 7 * DIA_MS, fim = ini + 7 * DIA_MS;
+    const coorte = testesLista.filter((t) => t.criado >= ini && t.criado < fim);
+    const conv = coorte.map((t) => ({ t: t, v: convertido(t) })).filter((x) => x.v);
+    const mesma = conv.filter((x) => x.v.inicio && x.v.inicio < fim).length;
+    const tr = el('tr');
+    tr.appendChild(el('td', null, fmtDM(ini) + ' a ' + fmtDM(fim - 1) + (i === 0 ? ' (esta semana)' : '')));
+    tr.appendChild(el('td', 'num', String(coorte.length)));
+    tr.appendChild(el('td', 'num', String(conv.length)));
+    tr.appendChild(el('td', 'num', String(mesma)));
+    tr.appendChild(el('td', 'num', coorte.length ? Math.round(conv.length / coorte.length * 100) + '%' : '—'));
+    tb.appendChild(tr);
+  }
+}
+
+/* ── ranking de títulos mais pedidos ── */
+let rankingBase = [];
+async function carregarRanking() {
+  try {
+    const s = await getDocs(query(collection(db, 'pedidos'), limit(3000)));
+    const mapa = new Map();
+    s.forEach((d) => {
+      const p = d.data();
+      if (!p.tmdbId && !p.titulo) return;
+      const chave = (p.tipo === 'serie' ? 'serie' : 'filme') + '_' + (p.tmdbId || String(p.titulo).toLowerCase());
+      const st = p.status || 'pendente';
+      let r = mapa.get(chave);
+      if (!r) { r = { titulo: p.titulo || '(sem título)', ano: p.ano || '', tipo: p.tipo === 'serie' ? 'serie' : 'filme', capa: p.capa || '', total: 0, pendentes: 0, atendidos: 0, ultimo: 0 }; mapa.set(chave, r); }
+      r.total++; if (st === 'pendente') r.pendentes++; if (st === 'atendido') r.atendidos++;
+      r.ultimo = Math.max(r.ultimo, ms(p.ts));
+      if (!r.capa && p.capa) r.capa = p.capa;
+    });
+    rankingBase = Array.from(mapa.values());
+    desenharRanking();
+  } catch (e) {
+    console.warn('[Admin] ranking:', e && e.code || e);
+    $('vazioRanking').textContent = 'Não deu pra carregar (' + (e && e.code || 'erro') + ').'; $('vazioRanking').hidden = false;
+  }
+}
+function desenharRanking() {
+  const soPend = $('filtroRanking').value === 'pendente';
+  const lista = rankingBase
+    .map((r) => ({ ...r, n: soPend ? r.pendentes : r.total }))
+    .filter((r) => r.n > 0)
+    .sort((a, b) => b.n - a.n || b.ultimo - a.ultimo)
+    .slice(0, 20);
+  const tb = $('tabRanking').querySelector('tbody'); tb.innerHTML = '';
+  $('ctRanking').textContent = lista.length ? 'top ' + lista.length : '';
+  $('vazioRanking').textContent = 'Nenhum pedido por aqui.';
+  $('vazioRanking').hidden = lista.length > 0;
+  const topoN = lista.length ? lista[0].n : 1;
+  lista.forEach((r, i) => {
+    const tr = el('tr');
+    tr.appendChild(el('td', 'num', String(i + 1)));
+    const td = el('td'); const w = el('div', 'rank-tit');
+    if (r.capa && /^https:\/\//.test(r.capa)) { const im = el('img'); im.alt = ''; im.loading = 'lazy'; im.referrerPolicy = 'no-referrer'; im.src = r.capa; w.appendChild(im); }
+    else w.appendChild(el('div', 'rank-capa', r.tipo === 'serie' ? '📺' : '🎬'));
+    w.appendChild(el('b', null, r.titulo + (r.ano ? ' (' + r.ano + ')' : '')));
+    td.appendChild(w); tr.appendChild(td);
+    tr.appendChild(el('td', null, r.tipo === 'serie' ? '📺 Série' : '🎬 Filme'));
+    const tdN = el('td', 'num'); tdN.appendChild(document.createTextNode(String(r.n)));
+    const barra = el('span', 'barra'); barra.style.width = Math.max(4, Math.round(r.n / topoN * 90)) + 'px'; tdN.appendChild(barra);
+    tr.appendChild(tdN);
+    const st = el('td');
+    st.appendChild(r.pendentes > 0 ? tag('⏳ ' + r.pendentes + ' pendente' + (r.pendentes > 1 ? 's' : ''), 'warn') : tag('✅ Atendido', 'ok'));
+    tr.appendChild(st);
+    tr.appendChild(el('td', null, fmtData(r.ultimo)));
+    tb.appendChild(tr);
+  });
+}
+$('filtroRanking').addEventListener('change', desenharRanking);
+$('recRanking').addEventListener('click', carregarRanking);
+
+/* ═══════════════════════ 🎁 CONVITES ═══════════════════════ */
+let convitesLista = [];
+async function carregarConvites() {
+  try {
+    const [sc, sp, sd] = await Promise.all([
+      getDocs(query(collection(db, 'convites'), limit(500))),
+      getDocs(query(collection(db, 'convites_privado'), limit(500))),
+      getDocs(query(collection(db, 'convites_donos'), limit(1000)))
+    ]);
+    const priv = new Map(); sp.forEach((d) => priv.set(d.id, d.data()));
+    const donos = new Map(); sd.forEach((d) => donos.set(d.id, d.data()));
+    convitesLista = [];
+    sc.forEach((d) => {
+      const c = d.data(), p = priv.get(d.id) || {}, dono = donos.get(c.conviteDe) || {};
+      convitesLista.push({
+        id: d.id, status: c.status || 'pendente', criado: ms(c.criadoEm), codigo: c.codigo || '',
+        amigoNome: c.amigoNome || '', amigoEmail: p.amigoEmail || '', amigoMasc: c.amigoEmailMasc || '',
+        convidanteEmail: dono.email || '', convidanteUid: c.conviteDe,
+        mesmoAparelho: !!((p.deviceId && dono.deviceId && p.deviceId === dono.deviceId) || (p.fp && dono.fp && p.fp === dono.fp)),
+        recompensadoEm: ms(c.recompensadoEm), bonusC: c.bonusConvidanteDias || 0, bonusA: c.bonusAmigoDias || 0
+      });
+    });
+    convitesLista.sort((a, b) => b.criado - a.criado);
+    desenharConvites();
+  } catch (e) {
+    console.warn('[Admin] convites:', e && e.code || e);
+    $('vazioConvites').textContent = 'Não deu pra carregar os convites (' + (e && e.code || 'erro') + ').'; $('vazioConvites').hidden = false;
+  }
+}
+
+function vipDoAmigo(c) { return c.amigoEmail ? vipLista.find((v) => v.id === emailKeyOf(c.amigoEmail)) : null; }
+const convitePronto = (c) => { const v = vipDoAmigo(c); return c.status === 'pendente' && !!v && v.ate > Date.now(); };
+
+function desenharConvites() {
+  const f = $('filtroConvites').value;
+  const prontos = convitesLista.filter(convitePronto).length;
+  $('ctConvites').textContent = prontos + ' prontos / ' + convitesLista.length;
+  const bd = $('bdConvites'); bd.hidden = prontos === 0; bd.textContent = prontos;
+  const vis = convitesLista.filter((c) => f === 'todos' || (f === 'prontos' ? convitePronto(c) : c.status === f));
+  const lista = $('listaConvites'); lista.innerHTML = '';
+  $('vazioConvites').textContent = 'Nenhum convite por aqui.';
+  $('vazioConvites').hidden = vis.length > 0;
+  vis.forEach((c) => lista.appendChild(cartaoConvite(c)));
+}
+
+function cartaoConvite(c) {
+  const v = vipDoAmigo(c), agora = Date.now();
+  const card = el('article', 'item cv');
+  const topo = el('div', 'item-topo');
+  topo.appendChild(el('small', 'item-meta', 'Convite de ' + fmtData(c.criado, true) + ' · código ' + c.codigo));
+  topo.appendChild(c.status === 'recompensado' ? tag('✅ Bônus liberado', 'ok') : c.status === 'recusado' ? tag('🚫 Recusado', 'bad') : tag('⏳ Pendente', 'warn'));
+  card.appendChild(topo);
+
+  const par = el('div', 'cv-par');
+  const a = el('div'); a.appendChild(el('small', null, 'Quem convidou')); a.appendChild(el('b', null, c.convidanteEmail || '(e-mail não encontrado)'));
+  const b = el('div'); b.appendChild(el('small', null, 'Amigo convidado')); b.appendChild(el('b', null, c.amigoEmail || c.amigoMasc || '—')); b.appendChild(el('span', null, c.amigoNome));
+  par.appendChild(a); par.appendChild(b); card.appendChild(par);
+
+  const av = el('div', 'avisos');
+  if (!v) av.appendChild(tag('Amigo ainda sem VIP', 'mut'));
+  else if (v.ate > agora) av.appendChild(tag('Amigo é VIP até ' + (v.ate > VITALICIO_MS ? 'sempre' : fmtData(v.ate)), 'ok'));
+  else av.appendChild(tag('VIP do amigo expirou em ' + fmtData(v.ate), 'warn'));
+  if (v && v.origem === 'admin') av.appendChild(tag('⚠️ VIP dado por você (não foi pagamento)', 'warn'));
+  if (c.mesmoAparelho) av.appendChild(tag('⚠️ Mesmo aparelho de quem convidou', 'bad'));
+  if (c.status === 'recompensado') av.appendChild(tag('+' + c.bonusC + ' dias pra quem convidou · +' + c.bonusA + ' pro amigo · ' + fmtData(c.recompensadoEm), 'ok'));
+  card.appendChild(av);
+
+  if (c.status !== 'recompensado') {
+    const acoes = el('div', 'responder');
+    const dar = el('button', 'btn btn--ok btn--sm', '🎁 Dar bônus (+' + BONUS_CONVIDANTE + ' / +' + BONUS_AMIGO + ' dias)'); dar.type = 'button';
+    dar.disabled = !convitePronto(c) || !c.convidanteEmail;
+    dar.title = dar.disabled ? 'Libera quando o amigo tiver VIP ativo' : '';
+    dar.addEventListener('click', () => darBonus(c, dar));
+    acoes.appendChild(dar);
+    if (c.status === 'pendente') {
+      const rec = el('button', 'btn btn--bad btn--sm', 'Recusar'); rec.type = 'button';
+      rec.addEventListener('click', () => mudarStatusConvite(c, 'recusado', rec));
+      acoes.appendChild(rec);
+    } else {
+      const rea = el('button', 'btn btn--ghost btn--sm', '↩️ Voltar pra pendente'); rea.type = 'button';
+      rea.addEventListener('click', () => mudarStatusConvite(c, 'pendente', rea));
+      acoes.appendChild(rea);
+    }
+    card.appendChild(acoes);
+  }
+  return card;
+}
+
+async function mudarStatusConvite(c, novo, btn) {
+  if (novo === 'recusado' && !confirm('Recusar este convite? Ninguém ganha bônus por ele.')) return;
+  btn.disabled = true;
+  try {
+    await updateDoc(doc(db, 'convites', c.id), { status: novo, atualizadoEm: serverTimestamp(), atualizadoPor: admin.email.toLowerCase() });
+    toast(novo === 'recusado' ? 'Convite recusado' : 'Convite voltou pra pendente');
+    await carregarConvites();
+  } catch (e) { console.warn('[Admin] status convite:', e && e.code || e); toast('⚠️ Não deu pra atualizar (' + (e && e.code || 'erro') + ')'); btn.disabled = false; }
+}
+
+// Soma os dias a partir do vencimento atual (se ainda ativo) ou de hoje. Vitalício não muda.
+function somarDias(docVip, dias) {
+  const atual = docVip.exists() ? ms(docVip.data().vip_ate) : 0;
+  if (atual > VITALICIO_MS) return atual;
+  return Math.max(atual, Date.now()) + dias * DIA_MS;
+}
+
+async function darBonus(c, btn) {
+  if (!confirm('Dar o bônus deste convite?\n\n• ' + c.convidanteEmail + ' ganha +' + BONUS_CONVIDANTE + ' dias\n• ' + c.amigoEmail + ' ganha +' + BONUS_AMIGO + ' dias\n\nIsso não pode ser feito duas vezes.')) return;
+  btn.disabled = true;
+  try {
+    const kA = emailKeyOf(c.amigoEmail), kC = emailKeyOf(c.convidanteEmail);
+    const refConv = doc(db, 'convites', c.id);
+    // lê tudo de novo agora: evita dar bônus em duplicidade (duplo clique / outra aba) e usar vencimento velho
+    const [sConv, sA, sC] = await Promise.all([getDoc(refConv), getDoc(doc(db, 'vip', kA)), getDoc(doc(db, 'vip', kC))]);
+    if (!sConv.exists() || sConv.data().status === 'recompensado') { toast('Esse convite já foi recompensado'); await carregarConvites(); return; }
+    if (!sA.exists()) { toast('O amigo ainda não tem VIP'); btn.disabled = false; return; }
+
+    const quem = admin.email.toLowerCase();
+    const ateA = somarDias(sA, BONUS_AMIGO), ateC = somarDias(sC, BONUS_CONVIDANTE);
+    const lote = writeBatch(db);
+    lote.set(doc(db, 'vip', kA), { email: c.amigoEmail.toLowerCase(), vip_ate: new Date(ateA).toISOString(), atualizadoEm: serverTimestamp(), atualizadoPor: quem }, { merge: true });
+    lote.set(doc(db, 'vip', kC), {
+      email: c.convidanteEmail.toLowerCase(), plano: sC.exists() && sC.data().plano ? sC.data().plano : 'gold',
+      origem: sC.exists() && sC.data().origem ? sC.data().origem : 'convite',
+      vip_ate: new Date(ateC).toISOString(), atualizadoEm: serverTimestamp(), atualizadoPor: quem
+    }, { merge: true });
+    lote.update(refConv, { status: 'recompensado', bonusConvidanteDias: BONUS_CONVIDANTE, bonusAmigoDias: BONUS_AMIGO, recompensadoEm: serverTimestamp(), recompensadoPor: quem });
+    await lote.commit();   // os 3 acontecem juntos ou nenhum acontece
+
+    toast('🎁 Bônus liberado! (o site guarda o status por até 1 hora em cada navegador)');
+    await carregarVip(); await carregarConvites(); desenharKpis();
+  } catch (e) {
+    console.warn('[Admin] darBonus:', e && e.code || e);
+    toast('⚠️ Não deu pra liberar (' + (e && e.code || 'erro') + ')'); btn.disabled = false;
+  }
+}
+$('filtroConvites').addEventListener('change', desenharConvites);
+$('recConvites').addEventListener('click', async () => { await carregarVip(); carregarConvites(); });

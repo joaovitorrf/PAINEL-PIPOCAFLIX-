@@ -27,10 +27,12 @@
   <header class="topo">
     <div class="topo-marca">🛡️ <b>PipocaFlix</b> Admin</div>
     <nav class="abas" role="tablist" aria-label="Seções do painel">
-      <button role="tab" class="aba" data-aba="assinantes" aria-selected="true">👑 Assinantes</button>
+      <button role="tab" class="aba" data-aba="resumo" aria-selected="true">📊 Resumo</button>
+      <button role="tab" class="aba" data-aba="assinantes" aria-selected="false">👑 Assinantes</button>
       <button role="tab" class="aba" data-aba="reports" aria-selected="false">🎫 Reports <span class="badge" id="bdReports" hidden></span></button>
       <button role="tab" class="aba" data-aba="pedidos" aria-selected="false">🎬 Pedidos <span class="badge" id="bdPedidos" hidden></span></button>
       <button role="tab" class="aba" data-aba="testes" aria-selected="false">⏱️ Testes grátis</button>
+      <button role="tab" class="aba" data-aba="convites" aria-selected="false">🎁 Convites <span class="badge" id="bdConvites" hidden></span></button>
     </nav>
     <div class="topo-user">
       <span id="userEmail"></span>
@@ -40,8 +42,58 @@
 
   <main class="conteudo">
 
+    <!-- ── Resumo ── -->
+    <section id="painel-resumo" class="painel" role="tabpanel">
+      <div class="kpis" id="kpis"></div>
+
+      <div class="cartao">
+        <div class="cartao-topo">
+          <h2>📈 Assinantes ativos ao longo do tempo</h2>
+          <div class="ferramentas">
+            <select id="grPeriodo" aria-label="Período">
+              <option value="30">30 dias</option>
+              <option value="90" selected>90 dias</option>
+              <option value="180">180 dias</option>
+            </select>
+            <button type="button" id="recResumo" class="btn btn--ghost" title="Atualizar">↻</button>
+          </div>
+        </div>
+        <div id="grafico" class="grafico"></div>
+        <p class="dica" id="grLegenda"></p>
+      </div>
+
+      <div class="cartao">
+        <div class="cartao-topo"><h2>🔁 Teste grátis → assinante</h2></div>
+        <p class="dica">Cada linha é uma semana. “Testes” = quantos começaram o teste naquela semana; “Assinaram” = quantos deles hoje têm VIP pago (VIP dado por você ou por convite não conta); “Na mesma semana” = os que assinaram até o fim da semana do teste.</p>
+        <div class="tabela-wrap"><table class="tabela" id="tabConversao">
+          <thead><tr><th>Semana</th><th>Testes</th><th>Assinaram</th><th>Na mesma semana</th><th>Taxa</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+        <p class="vazio" id="vazioConversao" hidden>Ainda não há testes registrados.</p>
+      </div>
+
+      <div class="cartao">
+        <div class="cartao-topo">
+          <h2>🎬 Títulos mais pedidos <span class="contagem" id="ctRanking"></span></h2>
+          <div class="ferramentas">
+            <select id="filtroRanking" aria-label="Filtro">
+              <option value="pendente">Só os que ainda faltam adicionar</option>
+              <option value="todos">Todos os pedidos</option>
+            </select>
+            <button type="button" id="recRanking" class="btn btn--ghost" title="Atualizar">↻</button>
+          </div>
+        </div>
+        <p class="dica">Quanto mais gente pediu o mesmo título, mais vale adicionar primeiro. Cada pessoa conta uma vez por título.</p>
+        <div class="tabela-wrap"><table class="tabela" id="tabRanking">
+          <thead><tr><th>#</th><th>Título</th><th>Tipo</th><th>Pedidos</th><th>Situação</th><th>Último pedido</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+        <p class="vazio" id="vazioRanking" hidden>Nenhum pedido por aqui.</p>
+      </div>
+    </section>
+
     <!-- ── Assinantes ── -->
-    <section id="painel-assinantes" class="painel" role="tabpanel">
+    <section id="painel-assinantes" class="painel" role="tabpanel" hidden>
       <div class="cartao">
         <h2>➕ Dar VIP para um e-mail</h2>
         <p class="dica">Use pra presentear alguém ou liberar manualmente. O e-mail precisa ser o mesmo que a pessoa usa pra entrar com Google no site.</p>
@@ -69,7 +121,8 @@
               <option value="ativos">Só ativos</option>
               <option value="expirados">Só expirados</option>
             </select>
-            <button type="button" id="recVip" class="btn btn--ghost">↻</button>
+            <button type="button" id="recVip" class="btn btn--ghost" title="Atualizar">↻</button>
+            <button type="button" id="csvVip" class="btn" title="Baixa a lista que está na tela (respeita o filtro e a busca)">⬇️ Exportar CSV</button>
           </div>
         </div>
         <div class="tabela-wrap"><table class="tabela" id="tabVip">
@@ -128,12 +181,34 @@
             <button type="button" id="recTestes" class="btn btn--ghost">↻</button>
           </div>
         </div>
-        <p class="dica">Cada e-mail só pode usar o teste uma vez. Se quiser dar mais uma chance a alguém, use <b>Liberar de novo</b> (apaga o registro).</p>
+        <p class="dica">O teste é só pra Gmail (entrando com o Google) e vale <b>uma vez por e-mail e uma vez por aparelho</b>. Se quiser dar outra chance a alguém, use <b>Liberar de novo</b> — isso apaga o registro do e-mail <i>e</i> do aparelho dele.</p>
         <div class="tabela-wrap"><table class="tabela" id="tabTestes">
-          <thead><tr><th>E-mail</th><th>Começou em</th><th>Status</th><th>Ações</th></tr></thead>
+          <thead><tr><th>E-mail</th><th>Começou em</th><th>Aparelho</th><th>Status</th><th>Ações</th></tr></thead>
           <tbody></tbody>
         </table></div>
         <p class="vazio" id="vazioTestes" hidden>Nenhum teste registrado.</p>
+      </div>
+    </section>
+
+    <!-- ── Convites ── -->
+    <section id="painel-convites" class="painel" role="tabpanel" hidden>
+      <div class="cartao">
+        <div class="cartao-topo">
+          <h2>🎁 Convites de amigos <span class="contagem" id="ctConvites"></span></h2>
+          <div class="ferramentas">
+            <select id="filtroConvites" aria-label="Filtro">
+              <option value="prontos">💰 Amigo já assinou — falta dar o bônus</option>
+              <option value="pendente">⏳ Aguardando o amigo assinar</option>
+              <option value="recompensado">✅ Bônus já liberado</option>
+              <option value="recusado">🚫 Recusados</option>
+              <option value="todos">Todos</option>
+            </select>
+            <button type="button" id="recConvites" class="btn btn--ghost" title="Atualizar">↻</button>
+          </div>
+        </div>
+        <p class="dica">Quando o amigo assina, o botão <b>Dar bônus</b> fica liberado: <b id="bonusTxt"></b>. Os dias são somados ao VIP que a pessoa já tem. Fique de olho nos avisos ⚠️ antes de liberar.</p>
+        <div id="listaConvites" class="lista"></div>
+        <p class="vazio" id="vazioConvites" hidden>Nenhum convite por aqui.</p>
       </div>
     </section>
 
