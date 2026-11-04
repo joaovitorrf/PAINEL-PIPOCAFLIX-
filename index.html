@@ -33,6 +33,8 @@
       <button role="tab" class="aba" data-aba="pedidos" aria-selected="false">🎬 Pedidos <span class="badge" id="bdPedidos" hidden></span></button>
       <button role="tab" class="aba" data-aba="testes" aria-selected="false">⏱️ Testes grátis</button>
       <button role="tab" class="aba" data-aba="convites" aria-selected="false">🎁 Convites <span class="badge" id="bdConvites" hidden></span></button>
+      <button role="tab" class="aba" data-aba="recuperar" aria-selected="false">🎯 Recuperar</button>
+      <button role="tab" class="aba" data-aba="logados" aria-selected="false">👥 Logados</button>
     </nav>
     <div class="topo-user">
       <span id="userEmail"></span>
@@ -209,6 +211,94 @@
         <p class="dica">Quando o amigo assina, o botão <b>Dar bônus</b> fica liberado: <b id="bonusTxt"></b>. Os dias são somados ao VIP que a pessoa já tem. Fique de olho nos avisos ⚠️ antes de liberar.</p>
         <div id="listaConvites" class="lista"></div>
         <p class="vazio" id="vazioConvites" hidden>Nenhum convite por aqui.</p>
+      </div>
+    </section>
+
+    <!-- ── Logados ── -->
+    <section id="painel-logados" class="painel" role="tabpanel" hidden>
+      <div class="kpis" id="kpisLogados"></div>
+      <div class="cartao">
+        <div class="cartao-topo">
+          <h2>👥 Quem já logou no site <span class="contagem" id="ctLogados"></span></h2>
+          <div class="ferramentas">
+            <input id="buscaLogados" type="search" placeholder="Buscar nome ou e-mail…" aria-label="Buscar nome ou e-mail">
+            <select id="filtroLogados" aria-label="Filtro">
+              <option value="todos">Todos</option>
+              <option value="so">🌱 Só logaram (nunca testaram nem assinaram)</option>
+              <option value="testou">⏱️ Testaram e não assinaram</option>
+              <option value="teste">🟢 Em teste agora</option>
+              <option value="vip">👑 VIP ativo</option>
+              <option value="ex">💤 VIP que expirou</option>
+              <option value="hoje">📅 Entraram nas últimas 24h</option>
+              <option value="7d">📅 Entraram nos últimos 7 dias</option>
+            </select>
+            <select id="ordemLogados" aria-label="Ordenar por">
+              <option value="acesso">Último acesso (mais recente)</option>
+              <option value="criado">Conta criada (mais recente)</option>
+              <option value="nome">Nome (A–Z)</option>
+            </select>
+            <button type="button" id="csvLogados" class="btn btn--ghost">⬇️ CSV</button>
+            <button type="button" id="recLogados" class="btn btn--ghost" title="Atualizar">↻</button>
+          </div>
+        </div>
+        <p class="dica">Todas as contas que já entraram no PipocaFlix com o Google (dados do Firebase Authentication — por isso inclui quem só passou por lá e saiu). “Último acesso” é o último login/renovação de sessão. <b>🌱 Só logaram</b> é o grupo que entrou mas nunca começou o teste grátis nem assinou.</p>
+        <div class="tabela-wrap"><table class="tabela" id="tabLogados">
+          <thead><tr><th></th><th>Nome</th><th>E-mail</th><th>Conta criada</th><th>Último acesso</th><th>Situação</th><th>Ações</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+        <p class="vazio" id="vazioLogados" hidden></p>
+        <div class="mais-wrap"><button type="button" id="maisLogados" class="btn btn--ghost" hidden>Mostrar mais</button></div>
+      </div>
+    </section>
+
+    <!-- ── Recuperar (quem testou e não assinou) ── -->
+    <section id="painel-recuperar" class="painel" role="tabpanel" hidden>
+      <div class="kpis" id="kpisRec"></div>
+
+      <div class="cartao">
+        <div class="cartao-topo"><h2>✉️ Mensagem de reconquista</h2></div>
+        <p class="dica">Vai pra quem fez o teste grátis e <b>não assinou</b> (o teste precisa ter acabado). Cada pessoa recebe no máximo 3 e-mails, com pelo menos 7 dias entre eles, e todo e-mail tem o link de descadastro. Os e-mails <i>automáticos</i> (“faltam 30 min” e “acabou”) já saem sozinhos pra quem testar daqui pra frente.</p>
+        <div class="compor">
+          <label for="recAssunto">Assunto <small>(opcional — se vazio usa: “Volta pro PipocaFlix? Seus filmes estão te esperando 🍿”)</small></label>
+          <input id="recAssunto" type="text" maxlength="120" placeholder="Ex.: Sentimos sua falta! Volte com 30% de desconto">
+          <label for="recMensagem">Recado extra <small>(opcional — aparece no meio do e-mail, até 600 caracteres)</small></label>
+          <textarea id="recMensagem" maxlength="600" rows="3" placeholder="Ex.: Só até domingo: use o cupom VOLTA10 e pague menos no primeiro mês."></textarea>
+          <label for="recLink">Link do botão <small>(opcional — ex.: seu link da Cakto com cupom. Só aceita https://pay.cakto.com.br/… ou pipocaflix.fun. Vazio = página de planos)</small></label>
+          <input id="recLink" type="url" placeholder="https://pay.cakto.com.br/3ccvrnz_916550?coupon=VOLTA10">
+        </div>
+        <div class="ferramentas">
+          <select id="recTipoTeste" aria-label="Qual e-mail testar"><option value="reconquista">Reconquista</option><option value="aviso30">Aviso “faltam 30 min”</option><option value="fim">“Seu teste acabou”</option></select>
+          <button type="button" id="recEnviarTeste" class="btn btn--ghost">📨 Enviar e-mail de teste pra mim</button>
+        </div>
+      </div>
+
+      <div class="cartao">
+        <div class="cartao-topo">
+          <h2>🎯 Testaram e não assinaram <span class="contagem" id="ctRec"></span></h2>
+          <div class="ferramentas">
+            <input id="buscaRec" type="search" placeholder="Buscar e-mail…" aria-label="Buscar e-mail">
+            <select id="filtroRec" aria-label="Filtro">
+              <option value="prontos">✅ Prontos pra receber</option>
+              <option value="recebeu">📨 Já receberam reconquista</option>
+              <option value="andamento">🟢 Teste ainda rolando</option>
+              <option value="saiu">🚫 Pediram pra não receber</option>
+              <option value="todos">Todos</option>
+            </select>
+            <button type="button" id="recSelTodos" class="btn btn--ghost">Marcar todos</button>
+            <button type="button" id="recCopiar" class="btn btn--ghost">📋 Copiar e-mails</button>
+            <button type="button" id="recRecarregar" class="btn btn--ghost" title="Atualizar">↻</button>
+          </div>
+        </div>
+        <div class="tabela-wrap"><table class="tabela" id="tabRec">
+          <thead><tr><th></th><th>E-mail</th><th>Testou em</th><th>Acabou há</th><th>E-mails enviados</th><th>Situação</th><th>Ações</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+        <p class="vazio" id="vazioRec" hidden></p>
+        <div class="barra-envio">
+          <span id="recSelTxt">Nenhuma pessoa marcada</span>
+          <button type="button" id="recEnviar" class="btn btn--pri" disabled>✉️ Enviar reconquista</button>
+        </div>
+        <div id="recResultado" class="resultado" hidden></div>
       </div>
     </section>
 

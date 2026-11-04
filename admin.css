@@ -119,3 +119,21 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--red);outline-off
 @media (max-width:640px){.cv-par{grid-template-columns:1fr}}
 @media (max-width:640px){.topo{padding:.6rem .8rem}.topo-user span{display:none}.conteudo{padding:.8rem .6rem 3rem}.ped img,.ped .ped-capa{width:56px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* ── abas Logados e Recuperar ── */
+.avatar{display:block;width:36px;height:36px;border-radius:50%;object-fit:cover;background:var(--card2);border:1px solid var(--line)}
+.avatar--ini{display:grid;place-items:center;font-size:.78rem;font-weight:800;color:var(--tx2)}
+.tabela td.etiquetas .tag{margin:0 .3rem .25rem 0}
+#tabLogados td.email,#tabRec td.email{min-width:210px}
+.tabela .btn{white-space:nowrap}
+.chk{width:18px;height:18px;padding:0;accent-color:var(--red)}
+.mais-wrap{margin-top:.9rem;text-align:center}
+.compor{display:grid;gap:.4rem;margin:.2rem 0 1rem}
+.compor label{margin-top:.4rem;font-size:.8rem;font-weight:600;color:var(--tx2)}
+.compor label small{font-weight:400;color:var(--tx3)}
+.compor textarea{min-height:76px;resize:vertical;width:100%}
+.compor input{width:100%}
+.barra-envio{display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap;margin-top:1rem;padding:.8rem 1rem;border-radius:var(--r);border:1px solid var(--line2);background:var(--card)}
+.resultado{margin-top:.9rem;padding:.8rem 1rem;border-radius:var(--r);border:1px solid var(--line2);font-size:.85rem;display:grid;gap:.25rem}
+.resultado--ok{border-color:rgba(61,220,132,.4);background:rgba(61,220,132,.07)}
+.resultado--bad{border-color:rgba(255,84,104,.4);background:rgba(255,84,104,.07)}

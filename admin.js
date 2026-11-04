@@ -22,6 +22,7 @@ import {
   getFirestore, collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, addDoc, query, orderBy, limit,
   onSnapshot, serverTimestamp, writeBatch
 } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-functions.js";
 
 const ADMIN_EMAILS = ['canalpedroid@gmail.com'];
 const TRIAL_MS = 3 * 60 * 60 * 1000;
@@ -99,12 +100,13 @@ onAuthStateChanged(auth, async (user) => {
 });
 
 /* ═══════════════════════ ABAS ═══════════════════════ */
-const ABAS = ['resumo', 'assinantes', 'reports', 'pedidos', 'testes', 'convites'];
+const ABAS = ['resumo', 'assinantes', 'reports', 'pedidos', 'testes', 'convites', 'recuperar', 'logados'];
 function abrirAba(nome) {
   if (!ABAS.includes(nome)) nome = 'resumo';
   document.querySelectorAll('.aba').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.aba === nome)));
   ABAS.forEach((a) => { $('painel-' + a).hidden = a !== nome; });
   try { history.replaceState(null, '', '#' + nome); } catch (e) {}
+  if (nome === 'logados' && !logadosCarregado && !logadosCarregando) carregarLogados();     // só baixa a lista quando a aba é aberta
 }
 document.querySelectorAll('.aba').forEach((b) => b.addEventListener('click', () => abrirAba(b.dataset.aba)));
 
@@ -119,6 +121,8 @@ function iniciarPainel() {
 
 /* ═══════════════════════ 👑 ASSINANTES ═══════════════════════ */
 let vipLista = [];
+let vipOk = false, testesOk = false;      // as abas Recuperar/Logados cruzam VIP × testes: só desenham quando os dois chegaram
+function redesenharCruzadas() { if (!(vipOk && testesOk)) return; desenharRecuperar(); if (logadosCarregado) desenharLogados(); }
 let vipVisiveis = [];            // o que está na tela agora (usado pelo CSV)
 
 // Quando o VIP começou. O painel não sabe qual campo o seu webhook de pagamento grava,
@@ -139,7 +143,9 @@ async function carregarVip() {
       vipLista.push({ id: d.id, email: x.email || d.id, plano: x.plano || '—', ate: ate, origem: x.origem || '', inicio: inicioDoVip(x, ate) });
     });
     vipLista.sort((a, b) => b.ate - a.ate);
+    vipOk = true;
     desenharVip();
+    redesenharCruzadas();
   } catch (e) {
     console.warn('[Admin] vip:', e && e.code || e);
     $('vazioVip').textContent = 'Não deu pra carregar os assinantes (' + (e && e.code || 'erro') + ').';
@@ -433,10 +439,14 @@ async function carregarTestes() {
     testesLista = [];
     snap.forEach((d) => {
       const x = d.data();
-      testesLista.push({ id: d.id, email: x.email || d.id, criado: ms(x.criadoEm), uid: x.uid || '', deviceId: x.deviceId || '', fp: x.fp || '' });
+      testesLista.push({ id: d.id, email: x.email || d.id, criado: ms(x.criadoEm), uid: x.uid || '', deviceId: x.deviceId || '', fp: x.fp || '',
+        // e-mails enviados pelas Cloud Functions (campos que só o servidor grava)
+        emailAviso30: ms(x.emailAviso30Em), emailFim: ms(x.emailFimEm), reconquistaEm: ms(x.reconquistaEm), reconquistaN: x.reconquistaN || 0, optOut: !!x.emailOptOut });
     });
     testesLista.sort((a, b) => b.criado - a.criado);
+    testesOk = true;
     desenharTestes();
+    redesenharCruzadas();
   } catch (e) {
     console.warn('[Admin] trial:', e && e.code || e);
     $('vazioTestes').textContent = 'Não deu pra carregar (' + (e && e.code || 'erro') + ').'; $('vazioTestes').hidden = false;
@@ -478,6 +488,286 @@ function desenharTestes() {
 }
 $('buscaTeste').addEventListener('input', desenharTestes);
 $('recTestes').addEventListener('click', carregarTestes);
+
+/* ═══════════════════════ ☁️ CLOUD FUNCTIONS (logados, e-mails) ═══════════════════════ */
+// Região onde você publicou as functions (REGION no index.js das functions)
+const REGIAO_FUNCTIONS = 'us-central1';
+const fns = getFunctions(app, REGIAO_FUNCTIONS);
+async function chamarFn(nome, dados) {
+  try { return (await httpsCallable(fns, nome)(dados || {})).data; }
+  catch (e) {
+    const cod = (e && e.code) || '';
+    // função ainda não publicada = 404 / erro de rede (o navegador reporta como CORS)
+    if (cod === 'functions/not-found' || cod === 'functions/unavailable' || (cod === 'functions/internal' && /fetch|network|cors/i.test((e && e.message) || ''))) {
+      const err = new Error('FN_NAO_PUBLICADA'); err.original = e; throw err;
+    }
+    throw e;
+  }
+}
+const msgErroFn = (e) => (e && e.message === 'FN_NAO_PUBLICADA')
+  ? 'As Cloud Functions ainda não foram publicadas. Siga o README da pasta “pipocaflix-functions” (passo 4: firebase deploy --only functions).'
+  : (e && e.message) || 'erro desconhecido';
+
+function baixarCsv(nomeArquivo, linhas) {
+  const csv = '\ufeff' + linhas.map((l) => l.map(csvCelula).join(',')).join('\r\n');     // BOM: sem ele o Excel estraga os acentos
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = el('a'); a.href = url; a.download = nomeArquivo;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+const iniciais = (nome, email) => { const t = String(nome || email || '?').trim().split(/\s+/).slice(0, 2).map((p) => p[0] || '').join(''); return (t || '?').toUpperCase(); };
+function copiar(texto, aviso) {
+  const ok = () => toast(aviso || '📋 Copiado!');
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(texto).then(ok, () => window.prompt('Copie:', texto));
+  else window.prompt('Copie:', texto);
+}
+function fmtHa(ms_) {      // "há 3 h", "há 2 dias"
+  const d = Date.now() - ms_; if (d < 0) return 'agora';
+  const min = Math.floor(d / 60000); if (min < 60) return min + ' min';
+  const h = Math.floor(min / 60); if (h < 48) return h + ' h';
+  return Math.floor(h / 24) + ' dias';
+}
+
+/* ═══════════════════════ 👥 LOGADOS ═══════════════════════ */
+let logados = [];
+let logadosCarregado = false, logadosCarregando = false;
+const POR_PAGINA_LOGADOS = 100;
+let limiteLogados = POR_PAGINA_LOGADOS;
+let logadosVisiveis = [];
+
+async function carregarLogados() {
+  if (logadosCarregando) return;
+  logadosCarregando = true;
+  $('recLogados').disabled = true;
+  $('vazioLogados').textContent = 'Carregando contas…'; $('vazioLogados').hidden = false;
+  try {
+    const todos = []; let token = null;
+    do {
+      const r = await chamarFn('listarLogados', token ? { pageToken: token } : {});
+      for (const u of r.users) todos.push(u);
+      token = r.nextPageToken;
+      $('vazioLogados').textContent = 'Carregando contas… ' + todos.length;
+    } while (token && todos.length < 200000);
+    logados = todos; logadosCarregado = true;
+    desenharLogados();
+  } catch (e) {
+    console.warn('[Admin] listarLogados:', e);
+    $('vazioLogados').textContent = '⚠️ Não deu pra carregar: ' + msgErroFn(e); $('vazioLogados').hidden = false;
+  } finally { logadosCarregando = false; $('recLogados').disabled = false; }
+}
+
+// onde a pessoa está no funil (cruza com assinantes e testes que o painel já carregou)
+function situacaoDe(u, vipMap, testeMap, agora) {
+  const k = emailKeyOf(u.email);
+  const v = vipMap.get(k), t = testeMap.get(k);
+  if (v && v.ate > agora) return { cod: 'vip', txt: v.ate > VITALICIO_MS ? 'VIP vitalício' : 'VIP até ' + fmtData(v.ate), cls: 'ok' };
+  if (v) return { cod: 'ex', txt: 'VIP expirou', cls: 'mut' };          // já teve VIP (mesmo que também tenha feito o teste antes): não é "testou e não assinou"
+  if (t) return agora - t.criado < TRIAL_MS ? { cod: 'teste', txt: 'Em teste agora', cls: 'warn' } : { cod: 'testou', txt: 'Testou e não assinou', cls: 'bad' };
+  return { cod: 'so', txt: 'Só logou', cls: 'mut' };
+}
+function avatarEl(u) {
+  const ini = () => el('div', 'avatar avatar--ini', iniciais(u.nome, u.email));
+  if (!u.foto) return ini();
+  const img = el('img', 'avatar'); img.src = u.foto; img.alt = ''; img.width = 36; img.height = 36; img.loading = 'lazy';
+  img.referrerPolicy = 'no-referrer';                 // as fotos do Google falham em alguns navegadores se mandar o referrer
+  img.addEventListener('error', () => img.replaceWith(ini()));
+  return img;
+}
+
+function desenharLogados() {
+  const agora = Date.now();
+  const vipMap = new Map(vipLista.map((v) => [v.id, v]));
+  const testeMap = new Map(testesLista.map((t) => [t.id, t]));
+  const enriquecidos = logados.map((u) => ({ u, s: situacaoDe(u, vipMap, testeMap, agora) }));
+
+  // números do topo (sobre TODOS, não só o filtro)
+  const cont = (cod) => enriquecidos.filter((x) => x.s.cod === cod).length;
+  const k = (valor, rotulo, cls) => { const d = el('div', 'kpi' + (cls ? ' kpi--' + cls : '')); d.appendChild(el('b', null, valor)); d.appendChild(el('span', null, rotulo)); return d; };
+  const box = $('kpisLogados'); box.innerHTML = '';
+  box.appendChild(k(String(logados.length), 'contas que já logaram'));
+  box.appendChild(k(String(logados.filter((u) => agora - u.ultimoAcesso < 7 * DIA_MS).length), 'entraram nos últimos 7 dias'));
+  box.appendChild(k(String(cont('vip')), 'com VIP ativo', 'ok'));
+  box.appendChild(k(String(cont('teste')), 'em teste agora', 'warn'));
+  box.appendChild(k(String(cont('testou')), 'testaram e não assinaram'));
+  box.appendChild(k(String(cont('so')), 'só logaram (sem teste, sem VIP)'));
+
+  const busca = $('buscaLogados').value.trim().toLowerCase();
+  const f = $('filtroLogados').value;
+  let vis = enriquecidos.filter(({ u, s }) => {
+    if (busca && !(u.email.toLowerCase().includes(busca) || (u.nome || '').toLowerCase().includes(busca))) return false;
+    if (f === 'hoje') return agora - u.ultimoAcesso < DIA_MS;
+    if (f === '7d') return agora - u.ultimoAcesso < 7 * DIA_MS;
+    return f === 'todos' || s.cod === f;
+  });
+  const ordem = $('ordemLogados').value;
+  vis.sort((a, b) => ordem === 'nome' ? (a.u.nome || a.u.email).localeCompare(b.u.nome || b.u.email, 'pt-BR')
+                    : ordem === 'criado' ? b.u.criadoEm - a.u.criadoEm
+                    : (b.u.ultimoAcesso || b.u.ultimoLogin) - (a.u.ultimoAcesso || a.u.ultimoLogin));
+  logadosVisiveis = vis;
+
+  $('ctLogados').textContent = vis.length === logados.length ? String(logados.length) : vis.length + ' de ' + logados.length;
+  const tb = $('tabLogados').querySelector('tbody'); tb.innerHTML = '';
+  $('vazioLogados').textContent = logados.length ? 'Ninguém com esse filtro.' : 'Nenhuma conta encontrada.';
+  $('vazioLogados').hidden = vis.length > 0;
+  vis.slice(0, limiteLogados).forEach(({ u, s }) => {
+    const tr = el('tr');
+    const tdFoto = el('td'); tdFoto.appendChild(avatarEl(u)); tr.appendChild(tdFoto);
+    tr.appendChild(el('td', null, u.nome || '—'));
+    const tdEmail = el('td', 'email', u.email || '(sem e-mail)'); if (u.desativado) tdEmail.title = 'Conta desativada'; tr.appendChild(tdEmail);
+    tr.appendChild(el('td', null, fmtData(u.criadoEm, false)));
+    const tdAc = el('td', null, fmtData(u.ultimoAcesso || u.ultimoLogin, true)); tdAc.title = 'Último acesso há ' + fmtHa(u.ultimoAcesso || u.ultimoLogin); tr.appendChild(tdAc);
+    const tdSt = el('td'); tdSt.appendChild(tag(s.txt, s.cls)); if (u.desativado) { tdSt.appendChild(document.createTextNode(' ')); tdSt.appendChild(tag('desativada', 'bad')); } tr.appendChild(tdSt);
+    const tdAcoes = el('td', 'acoes');
+    const b = el('button', 'btn btn--sm', '📋 E-mail'); b.type = 'button'; b.title = 'Copiar e-mail'; b.addEventListener('click', () => copiar(u.email, '📋 ' + u.email + ' copiado'));
+    tdAcoes.appendChild(b); tr.appendChild(tdAcoes);
+    tb.appendChild(tr);
+  });
+  const mais = $('maisLogados'); mais.hidden = vis.length <= limiteLogados;
+  mais.textContent = 'Mostrar mais (' + Math.min(POR_PAGINA_LOGADOS, vis.length - limiteLogados) + ' de ' + (vis.length - limiteLogados) + ' restantes)';
+  $('csvLogados').disabled = vis.length === 0;
+}
+['buscaLogados', 'filtroLogados', 'ordemLogados'].forEach((id) => $(id).addEventListener(id === 'buscaLogados' ? 'input' : 'change', () => { limiteLogados = POR_PAGINA_LOGADOS; if (logadosCarregado) desenharLogados(); }));
+$('maisLogados').addEventListener('click', () => { limiteLogados += POR_PAGINA_LOGADOS; desenharLogados(); });
+$('recLogados').addEventListener('click', carregarLogados);
+$('csvLogados').addEventListener('click', () => {
+  if (!logadosVisiveis.length) { toast('Nada pra exportar'); return; }
+  const agora = Date.now();
+  const vipMap = new Map(vipLista.map((v) => [v.id, v])), testeMap = new Map(testesLista.map((t) => [t.id, t]));
+  const linhas = [['nome', 'email', 'conta_criada', 'ultimo_acesso', 'situacao']];
+  logadosVisiveis.forEach(({ u, s }) => linhas.push([u.nome, u.email, u.criadoEm ? new Date(u.criadoEm).toISOString() : '', (u.ultimoAcesso || u.ultimoLogin) ? new Date(u.ultimoAcesso || u.ultimoLogin).toISOString() : '', s.txt]));
+  baixarCsv('pipocaflix-logados-' + chaveDia(agora) + '.csv', linhas);
+  toast('⬇️ ' + logadosVisiveis.length + ' contas exportadas');
+});
+
+/* ═══════════════════════ 🎯 RECUPERAR (testou e não assinou) ═══════════════════════ */
+const REC_INTERVALO_MS = 7 * DIA_MS, REC_MAX = 3;         // iguais aos das functions (lib/core.js)
+let recSel = new Set();
+let recVisiveis = [];
+
+function candidatosRec() {
+  const agora = Date.now();
+  const vipMap = new Map(vipLista.map((v) => [v.id, v]));
+  return testesLista.map((t) => {
+    const v = vipMap.get(t.id);
+    const vipAtivo = !!v && v.ate > agora;
+    const pagouAntes = !!v && v.origem !== 'admin' && v.origem !== 'convite';      // ex-assinante de verdade: não entra nessa conversa
+    const emAndamento = agora - t.criado < TRIAL_MS;
+    const saiu = !!t.optOut;
+    const pronto = !vipAtivo && !pagouAntes && !emAndamento && !saiu && t.reconquistaN < REC_MAX && (!t.reconquistaEm || agora - t.reconquistaEm >= REC_INTERVALO_MS);
+    return Object.assign({}, t, { vipAtivo, pagouAntes, emAndamento, saiu, pronto, acabouEm: t.criado + TRIAL_MS, daVez: !vipAtivo && !pagouAntes });
+  }).filter((t) => t.daVez);
+}
+
+function desenharRecuperar() {
+  const agora = Date.now();
+  const todos = candidatosRec();
+  const naoEmAndamento = todos.filter((t) => !t.emAndamento);
+  const k = (valor, rotulo, cls) => { const d = el('div', 'kpi' + (cls ? ' kpi--' + cls : '')); d.appendChild(el('b', null, valor)); d.appendChild(el('span', null, rotulo)); return d; };
+  const box = $('kpisRec'); box.innerHTML = '';
+  const prontos = todos.filter((t) => t.pronto);
+  const jaReceberam = todos.filter((t) => t.reconquistaN > 0);
+  const vipMap = new Map(vipLista.map((v) => [v.id, v]));
+  const voltaram = testesLista.filter((t) => { const v = vipMap.get(t.id); return t.reconquistaEm && v && v.ate > agora && v.origem !== 'admin' && v.origem !== 'convite' && v.inicio >= t.reconquistaEm; }).length;
+  box.appendChild(k(String(naoEmAndamento.length), 'testaram e ainda não assinaram'));
+  box.appendChild(k(String(prontos.length), 'prontos pra receber o e-mail', prontos.length ? 'ok' : ''));
+  box.appendChild(k(String(jaReceberam.length), 'já receberam reconquista'));
+  box.appendChild(k(String(voltaram), 'assinaram depois do e-mail (estimativa)', voltaram ? 'ok' : ''));
+  box.appendChild(k(String(testesLista.filter((t) => t.emailAviso30 || t.emailFim).length), 'testes que receberam os avisos automáticos'));
+
+  const busca = $('buscaRec').value.trim().toLowerCase();
+  const f = $('filtroRec').value;
+  const vis = todos.filter((t) => {
+    if (busca && !t.email.toLowerCase().includes(busca)) return false;
+    return f === 'todos' ? true : f === 'prontos' ? t.pronto : f === 'recebeu' ? t.reconquistaN > 0 : f === 'andamento' ? t.emAndamento : t.saiu;
+  }).sort((a, b) => b.criado - a.criado);
+  recVisiveis = vis;
+  // desmarca quem saiu da lista de "prontos" (ex.: acabou de receber)
+  const prontosIds = new Set(prontos.map((t) => t.id));
+  recSel.forEach((id) => { if (!prontosIds.has(id)) recSel.delete(id); });
+
+  $('ctRec').textContent = vis.length;
+  $('vazioRec').textContent = todos.length ? 'Ninguém com esse filtro.' : 'Ninguém nessa situação (todo mundo que testou já assinou, ou ainda não há testes).';
+  $('vazioRec').hidden = vis.length > 0;
+  const tb = $('tabRec').querySelector('tbody'); tb.innerHTML = '';
+  vis.forEach((t) => {
+    const tr = el('tr');
+    const tdC = el('td'); const cb = el('input'); cb.type = 'checkbox'; cb.className = 'chk'; cb.checked = recSel.has(t.id); cb.disabled = !t.pronto;
+    cb.title = t.pronto ? 'Marcar' : (t.emAndamento ? 'O teste ainda está rolando' : t.saiu ? 'Pediu pra não receber' : 'Já recebeu há menos de 7 dias (ou 3 vezes)');
+    cb.addEventListener('change', () => { cb.checked ? recSel.add(t.id) : recSel.delete(t.id); atualizarBarraRec(); });
+    tdC.appendChild(cb); tr.appendChild(tdC);
+    tr.appendChild(el('td', 'email', t.email));
+    tr.appendChild(el('td', null, fmtData(t.criado, true)));
+    tr.appendChild(el('td', null, t.emAndamento ? 'rolando' : fmtHa(t.acabouEm)));
+    const tdE = el('td', 'etiquetas');
+    if (t.emailAviso30) tdE.appendChild(tag('⏳ aviso 30min', 'mut'));
+    if (t.emailFim) tdE.appendChild(tag('🏁 acabou', 'mut'));
+    if (t.reconquistaN) { const g = tag('🎯 reconquista ×' + t.reconquistaN, 'ok'); g.title = 'Último: ' + fmtData(t.reconquistaEm, true); tdE.appendChild(g); }
+    if (!tdE.childNodes.length) tdE.textContent = '—';
+    tr.appendChild(tdE);
+    const tdS = el('td'); tdS.appendChild(t.saiu ? tag('Não enviar', 'bad') : t.emAndamento ? tag('Teste rolando', 'warn') : t.pronto ? tag('Pronto', 'ok') : tag('Aguardando 7 dias', 'mut')); tr.appendChild(tdS);
+    const tdA = el('td', 'acoes');
+    const b = el('button', 'btn btn--sm', t.saiu ? '✅ Voltar a enviar' : '🚫 Não enviar'); b.type = 'button';
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try { await chamarFn('marcarSemEmail', { chave: t.id, valor: !t.saiu }); toast(t.saiu ? 'Voltou pra lista' : 'Não vai mais receber e-mails'); await carregarTestes(); }
+      catch (e) { toast('⚠️ ' + msgErroFn(e)); b.disabled = false; }
+    });
+    tdA.appendChild(b); tr.appendChild(tdA);
+    tb.appendChild(tr);
+  });
+  $('recSelTodos').textContent = vis.some((t) => t.pronto) && vis.filter((t) => t.pronto).every((t) => recSel.has(t.id)) ? 'Desmarcar todos' : 'Marcar todos';
+  atualizarBarraRec();
+}
+function atualizarBarraRec() {
+  const n = recSel.size;
+  $('recSelTxt').textContent = n ? n + (n === 1 ? ' pessoa marcada' : ' pessoas marcadas') : 'Nenhuma pessoa marcada';
+  $('recEnviar').disabled = n === 0;
+  $('recEnviar').textContent = n ? '✉️ Enviar reconquista (' + n + ')' : '✉️ Enviar reconquista';
+}
+['buscaRec', 'filtroRec'].forEach((id) => $(id).addEventListener(id === 'buscaRec' ? 'input' : 'change', desenharRecuperar));
+$('recRecarregar').addEventListener('click', async () => { await Promise.all([carregarVip(), carregarTestes()]); });
+$('recSelTodos').addEventListener('click', () => {
+  const prontos = recVisiveis.filter((t) => t.pronto);
+  const todosMarcados = prontos.length > 0 && prontos.every((t) => recSel.has(t.id));
+  prontos.forEach((t) => (todosMarcados ? recSel.delete(t.id) : recSel.add(t.id)));
+  desenharRecuperar();
+});
+$('recCopiar').addEventListener('click', () => {
+  if (!recVisiveis.length) { toast('Nada pra copiar'); return; }
+  copiar(recVisiveis.map((t) => t.email).join('\n'), '📋 ' + recVisiveis.length + ' e-mails copiados');
+});
+
+$('recEnviarTeste').addEventListener('click', async () => {
+  const b = $('recEnviarTeste'); b.disabled = true;
+  try { const r = await chamarFn('testarEmail', { tipo: $('recTipoTeste').value }); toast('📨 Enviado pra ' + r.para + ' — confira a caixa de entrada (e o spam)'); }
+  catch (e) { toast('⚠️ ' + msgErroFn(e)); }
+  finally { b.disabled = false; }
+});
+
+$('recEnviar').addEventListener('click', async () => {
+  const chaves = [...recSel]; if (!chaves.length) return;
+  const assunto = $('recAssunto').value.trim(), mensagem = $('recMensagem').value.trim(), linkOferta = $('recLink').value.trim();
+  if (linkOferta && !/^https:\/\/(pay\.cakto\.com\.br|www\.pipocaflix\.fun|pipocaflix\.fun)(\/|$|\?)/i.test(linkOferta)) { toast('⚠️ O link precisa começar com https://pay.cakto.com.br/ ou https://www.pipocaflix.fun/'); return; }
+  const resumo = 'Enviar o e-mail de reconquista para ' + chaves.length + (chaves.length === 1 ? ' pessoa' : ' pessoas') + '?\n\n'
+    + 'Assunto: ' + (assunto || 'Volta pro PipocaFlix? Seus filmes estão te esperando 🍿') + '\n'
+    + 'Botão: ' + (linkOferta || 'página de planos') + (mensagem ? '\nRecado: ' + mensagem.slice(0, 120) + (mensagem.length > 120 ? '…' : '') : '') + '\n\nNão dá pra desfazer.';
+  if (!confirm(resumo)) return;
+  const b = $('recEnviar'); b.disabled = true; b.textContent = 'Enviando…';
+  let enviados = 0; const pulados = []; const erros = [];
+  try {
+    for (let i = 0; i < chaves.length; i += 100) {
+      const r = await chamarFn('reconquistarTestes', { chaves: chaves.slice(i, i + 100), assunto, mensagem, linkOferta });
+      enviados += r.enviados || 0; (r.pulados || []).forEach((p) => pulados.push(p)); (r.erros || []).forEach((p) => erros.push(p));
+    }
+  } catch (e) { erros.push({ chave: '(todos)', motivo: msgErroFn(e) }); }
+  const MOTIVOS = { teste_em_andamento: 'teste ainda rolando', ja_assinou: 'já assinou', pediu_para_sair: 'pediu pra sair', enviado_recentemente: 'recebeu há menos de 7 dias', limite_de_envios: 'já recebeu 3 vezes', sem_teste: 'sem teste', email_invalido: 'e-mail inválido', chave_invalida: 'inválido' };
+  const out = $('recResultado'); out.hidden = false; out.className = 'resultado ' + (erros.length ? 'resultado--bad' : 'resultado--ok'); out.textContent = '';
+  out.appendChild(el('b', null, '✉️ ' + enviados + ' enviado' + (enviados === 1 ? '' : 's') + (pulados.length ? ' • ' + pulados.length + ' pulado' + (pulados.length === 1 ? '' : 's') : '') + (erros.length ? ' • ' + erros.length + ' com erro' : '')));
+  pulados.forEach((p) => out.appendChild(el('div', null, '↪ ' + p.chave + ' — ' + (MOTIVOS[p.motivo] || p.motivo))));
+  erros.forEach((p) => out.appendChild(el('div', null, '⚠️ ' + p.chave + ' — ' + p.motivo)));
+  toast(enviados ? '✉️ ' + enviados + ' e-mail(s) enviado(s)' : '⚠️ Nenhum e-mail foi enviado');
+  recSel.clear(); await carregarTestes();
+});
 
 /* ═══════════════════════ 📊 RESUMO ═══════════════════════ */
 const chaveDia = (t) => { const d = new Date(t); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
